@@ -203,14 +203,14 @@ const isDirector=()=>me()?.director&&roles.value==='Directeur',manage=()=>profil
 let credentials=JSON.parse(sessionStorage.getItem('ctp-cloud-session')||'null');
 function keep(t){credentials=t;if(t)sessionStorage.setItem('ctp-cloud-session',JSON.stringify(t));else sessionStorage.removeItem('ctp-cloud-session')}
 async function call(action,payload={},retry=true){
- const r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json',...(credentials?{Authorization:'Bearer '+credentials.access_token}:{})},body:JSON.stringify({action,...payload})});
+ let r;try{r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json',...(credentials?{Authorization:'Bearer '+credentials.access_token}:{})},body:JSON.stringify({action,...payload})})}catch{throw Error('Connexion réseau indisponible. Vos modifications restent ouvertes.')}
  if(r.status===401&&retry&&credentials&&action!=='refresh'){refreshing??=call('refresh',{refresh_token:credentials.refresh_token},false).then(keep).finally(()=>refreshing=null);await refreshing;return call(action,payload,false)}
- const result=await r.json();if(!r.ok)throw Error(result.error||'Connexion au serveur impossible.');return result
+ let result;try{result=await r.json()}catch{throw Error('Le serveur a renvoyé une réponse invalide. Réessayez.')}if(!r.ok)throw Error(result.error||'Connexion au serveur impossible.');return result
 }
 function clean(q){const {versions,_rev,...d}=q;return d}
 function resetView(){sid='';qid='';tab='document';staffPage=false;if(dlg.open)dlg.close();out.innerHTML=''}
 let changeSerial=0;
-async function sync(){const serial=changeSerial;const state=await call('state');if(serial!==changeSerial)return;people=state.accounts;currentId=state.uid;data={sessions:state.sessions,subjects:state.subjects};baseline={};for(const s of data.sessions)baseline[s.id]=true;for(const q of data.subjects)baseline[q.id]=JSON.stringify(clean(q));render()}
+async function sync(){const serial=changeSerial;const state=await call('state');if(serial!==changeSerial||hasUnsaved())return;people=state.accounts;currentId=state.uid;data={sessions:state.sessions,subjects:state.subjects};baseline={};for(const s of data.sessions)baseline[s.id]=true;for(const q of data.subjects)baseline[q.id]=JSON.stringify(clean(q));render()}
 async function flush(){
  for(const s of data.sessions){if(!baseline[s.id]){await call('session',s);baseline[s.id]=true}}
  for(const q of data.subjects){const doc=clean(q),encoded=JSON.stringify(doc);if(baseline[q.id]===encoded)continue;await commitSubject(q,encoded)}
@@ -251,8 +251,11 @@ async function commitSubject(q,encoded){
 }
 function hasContent(q){return Boolean(q.body.trim()||q.figures.length||q.images.length)}
 function printableFigures(q){return q.body.trim()?q.figures:[...q.images.map(src=>({src,width:90,align:'centre'})),...q.figures]}
-function useFigureAsSource(i){const q=subject(),f=q.figures[i];if(!q.images.includes(f.src))q.images.push(f.src);q.figures.splice(i,1);save();render();return assist('transcribe')}
-function pending(){clearTimeout(timer);queue=queue.catch(()=>{}).then(flush);return queue}
+function removeFigure(i){if(confirm('Retirer ce schéma ?')){subject().figures.splice(i,1);save();render()}}
+function useFigureAsSource(i){const q=subject(),f=q.figures[i];if(!f)return;if(!q.images.includes(f.src)){q.images.push(f.src);save()}render();return assist('transcribe')}
+function hasUnsaved(){return data.sessions.some(s=>!baseline[s.id])||data.subjects.some(q=>baseline[q.id]!==JSON.stringify(clean(q)))}
+function pending(){clearTimeout(timer);queue=queue.catch(()=>{}).then(async()=>{for(let i=0;i<5;i++){await flush();if(!hasUnsaved())return}throw Error('Des changements sont encore en cours. Réessayez.')});return queue}
+window.addEventListener('beforeunload',e=>{if(hasUnsaved()){e.preventDefault();e.returnValue=''}});
 function save(){changeSerial++;clearTimeout(timer);document.querySelector('#cloudStatus').textContent='Enregistrement…';timer=setTimeout(()=>pending().then(()=>document.querySelector('#cloudStatus').textContent='Enregistré').catch(e=>{document.querySelector('#cloudStatus').textContent='Échec de sauvegarde · '+e.message}),300)}
 async function logout(){try{await pending();await call('logout')}catch(e){return alert(e.message)}keep(null);people=[];currentId='';data={sessions:[],subjects:[]};baseline={};resetView();render()}
 function authPage(){roles.hidden=true;document.querySelector('#accountActions').hidden=true;app.innerHTML='<section class="hero scene scene-enseignante"><div class="scene-copy"><small>COLLÈGE TERRE PROMISE</small><h1>'+ (registering?'Activer la direction':'Connexion')+'</h1></div></section><form class="card authform">'+(registering?field('Code privé d’activation','code')+field('Nom affiché','name'):'')+field('Identifiant','login')+'<label>Mot de passe<input type="password" name="password" required autocomplete="'+(registering?'new-password':'current-password')+'"></label><p role="alert"></p><button>'+ (registering?'Activer mon compte':'Se connecter')+'</button></form>'+btn(registering?'Revenir à la connexion':'Première activation du directeur','registering=!registering;render()',true);
@@ -260,10 +263,32 @@ function authPage(){roles.hidden=true;document.querySelector('#accountActions').
 async function delegate(id){try{await call('delegate',{id,enable:!accounts().find(a=>a.id===id).delegate});await sync()}catch(e){alert(e.message)}}
 function createTeacher(){if(!isDirector())return;dlg.innerHTML='<form><h2>Créer un compte enseignant</h2>'+field('Nom affiché','name')+field('Identifiant','login')+'<label>Mot de passe (8 caractères minimum)<input type="password" name="password" minlength="8" required></label><p role="alert"></p><button>Créer le compte</button> '+btn('Annuler','event.preventDefault();dlg.close()',true)+'</form>';dlg.querySelector('form').onsubmit=async e=>{e.preventDefault();const f=e.target,b=f.querySelector('button');b.disabled=true;try{await call('teacher',Object.fromEntries(new FormData(f)));dlg.close();await sync()}catch(err){f.querySelector('[role=alert]').textContent=err.message}finally{b.disabled=false}};dlg.showModal()}
 const activeAI=new Set();
-async function assist(mode){const q=subject(),original=q.body;if(activeAI.has(q.id))return;if(mode==='analyse'&&!original.trim())return;activeAI.add(q.id);const msg=document.querySelector('#cloudStatus');try{msg.textContent=mode==='transcribe'?'Transcription des photos en cours…':'Analyse des questions en cours…';await pending();const r=await call('assist',{id:q.id,mode});if(q.body!==original)throw Error('Le questionnaire a changé. Relancez la demande.');if(mode==='transcribe'){if(original&&!confirm('Remplacer le texte par la transcription ?'))return;const figures=[];for(const spec of r.figures||[]){if(!q.images[spec.page-1])continue;figures.push(await makeFigure(spec,q.images))}q.body=r.text;q.figures=[...q.figures,...figures];tab='document'}else q.analysis=r;save();render()}catch(e){msg.textContent=e.message}finally{activeAI.delete(q.id)}}
+async function assist(mode){
+ const q=subject();if(!q||activeAI.has(q.id))return;
+ const original=q.body,sourceSnapshot=JSON.stringify(q.images);if(mode==='analyse'&&!original.trim())return;
+ if(mode==='transcribe'&&!q.images.length)return;
+ activeAI.add(q.id);const msg=document.querySelector('#cloudStatus');
+ try{
+  msg.textContent=mode==='transcribe'?'Transcription des photos en cours…':'Analyse des questions en cours…';await pending();
+  const r=await call('assist',{id:q.id,mode});
+  if(subject()?.id!==q.id||q.body!==original||JSON.stringify(q.images)!==sourceSnapshot)throw Error('Le questionnaire ou les photos ont changé. Relancez la demande.');
+  if(mode==='transcribe'){
+   if(typeof r.text!=='string'||!r.text.trim())throw Error('Aucun texte lisible détecté. Les photos sources sont conservées.');
+   if(original&&!confirm('Remplacer le texte par la transcription ?'))return;
+   const figures=[];let skipped=0;
+   for(const spec of r.figures||[]){
+    if(!q.images[spec.page-1]){skipped++;continue}
+    try{figures.push(await makeFigure(spec,q.images,q.id))}catch{skipped++}
+   }
+   if(subject()?.id!==q.id||q.body!==original||JSON.stringify(q.images)!==sourceSnapshot)throw Error('Le questionnaire a changé pendant le traitement.');
+   q.body=r.text;q.figures=[...q.figures,...figures.filter(f=>!q.figures.some(g=>g.src===f.src))];delete q.analysis;tab='document';
+   save();render();await pending();msg.textContent=skipped?'Texte enregistré. '+skipped+' schéma(s) à vérifier dans les photos sources.':'Transcription enregistrée.';
+  }else{q.analysis=r;save();render();await pending();msg.textContent='Analyse enregistrée.'}
+ }catch(e){msg.textContent=e.message}finally{activeAI.delete(q.id)}
+}
 async function reloadCloud(){try{if(credentials){await pending();await sync()}else render()}catch(e){document.querySelector('#cloudStatus').textContent=e.message;if(!me()){keep(null);render()}}}
 window.addEventListener('focus',()=>{if(!qid&&!dlg.open&&!app.querySelector('textarea:focus,input:focus'))reloadCloud()});
-async function makeFigure(spec,photos){
+async function makeFigure(spec,photos,subjectId){
  const im=new Image();im.src=photos[spec.page-1];await im.decode();const box=spec.box;
  if(!Array.isArray(box)||box.length!==4||!box.every(Number.isFinite))throw Error('Zone du schéma invalide.');
  const [y,x,b,r]=box.map(v=>Math.max(0,Math.min(1000,v))/1000);
@@ -274,7 +299,7 @@ async function makeFigure(spec,photos){
  if(!spec.shapes?.length)return fallback;
  c.fillStyle='white';c.fillRect(0,0,w,h);c.strokeStyle='#171717';c.fillStyle='#171717';c.lineWidth=Math.max(1,w/440);
  try{for(const s of spec.shapes.slice(0,400)){const X=v=>Number(v)*w/1000,Y=v=>Number(v)*h/1000;c.beginPath();if(s.type==='line'){c.moveTo(X(s.x),Y(s.y));c.lineTo(X(s.x2),Y(s.y2));c.stroke()}else if(s.type==='circle'){c.arc(X(s.x),Y(s.y),Math.abs(X(s.r)),0,2*Math.PI);c.stroke()}else if(s.type==='text'){c.font=Math.max(8,Y(s.size||70))+'px sans-serif';c.fillText(String(s.text||''),X(s.x),Y(s.y))}else return fallback}
- const src=canvas.toDataURL('image/png');const verdict=await call('verifyFigure',{id:subject().id,original,rendered:src});return verdict.match===true?{...fallback,src}:fallback}catch{return fallback}
+ const src=canvas.toDataURL('image/png');const verdict=await call('verifyFigure',{id:subjectId,original,rendered:src});return verdict.match===true?{...fallback,src}:fallback}catch{return fallback}
 }
 
 function profileBar(a){
@@ -299,9 +324,9 @@ function detail(q){const edit=(teach()&&owns(q)&&['Brouillon','Attendu','À corr
 if(tab==='analyse'){analysisPanel(p,q,edit);if(edit)p.insertAdjacentHTML('beforeend',q.body.trim()?btn('Analyser les questions',"assist('analyse')"):q.images.length?btn('Transcrire les photos avant l’analyse',"assist('transcribe')"):q.figures.length?btn('Choisir une image à transcrire',"setTab('document')",true):btn('Ajouter les questions',"setTab('document')",true));return}
 if(tab==='historique'){p.innerHTML='<h2>Versions envoyées</h2>'+(q.correctedBy?'<p>Dernière correction : '+esc(q.correctedBy)+'</p>':'')+q.versions.map((v,i)=>'<p>'+btn('Consulter la version '+(i+1),'oldVersion('+i+')',true)+' '+esc(new Date(v.date).toLocaleDateString('fr'))+'</p>').join('')+(q.versions.length?'':'Aucun envoi.');return}
 if(tab==='sources'){p.innerHTML='<h2>Photos sources</h2>'+(edit?'<label>Importer des photos<input type="file" accept="image/*" multiple onchange="upload(this,false)"></label>':'')+gallery(q.images,edit)+(edit&&q.images.length?btn('Transcrire les photos',"assist('transcribe')"):'');return}
-p.innerHTML=(q.comments.length?'<h3>Observations du secrétariat</h3>'+q.comments.map(c=>'<p>'+esc(c)+'</p>').join(''):'')+(edit?'<label>Photo du questionnaire à transcrire<input type="file" accept="image/*" multiple onchange="upload(this,false)"></label>'+(q.images.length?btn('Transcrire les photos',"assist('transcribe')",true):'')+'<div class="grid">'+['classe','branch','teacher'].map((k,i)=>field(['Classe','Branche','Titulaire'][i],k,q[k])).join('')+'</div><label>Questions<textarea id="body" placeholder="Saisir ou coller le questionnaire">'+esc(q.body)+'</textarea></label><label>Insérer un schéma<input type="file" accept="image/*" onchange="upload(this,true)"></label>'+q.figures.map((f,i)=>'<figure><img width="100" src="'+f.src+'">'+btn('Utiliser comme photo à transcrire','useFigureAsSource('+i+')',true)+'<label>Largeur (%)<input type="range" min="10" max="100" value="'+f.width+'" onchange="subject().figures['+i+'].width=+this.value;save()"></label><select aria-label="Position" onchange="subject().figures['+i+'].align=this.value;save()">'+['gauche','centre','droite'].map(a=>'<option '+(a===f.align?'selected':'')+'>'+a+'</option>').join('')+'</select></figure>').join(''):'<div class="question">'+esc(q.body||'Questionnaire en attente de saisie.')+'</div>')+'<label>Exemplaires par feuille<select id="copies">'+['Automatique','1','2','3','4'].map((l,i)=>'<option value="'+i+'" '+(q.copies===i?'selected':'')+'>'+l+'</option>').join('')+'</select></label><div class="actions">'+(hasContent(q)?btn(canPrint()?'Aperçu et impression':'Aperçu A4','preview()'):'')+(edit&&teach()&&hasContent(q)?btn('Envoyer à la direction','send()'):q.status==='Envoyé'&&!teach()?btn('Valider','statusTo(\'Validé\')')+btn('Demander une correction','correction()',true)+btn('Marquer imprimé','statusTo(\'Imprimé\')',true):q.status==='Validé'&&!teach()?btn('Marquer imprimé','statusTo(\'Imprimé\')'):'')+'</div>';
+p.innerHTML=(q.comments.length?'<h3>Observations du secrétariat</h3>'+q.comments.map(c=>'<p>'+esc(c)+'</p>').join(''):'')+(edit?'<label>Photo du questionnaire à transcrire<input type="file" accept="image/*" multiple onchange="upload(this,false)"></label>'+(q.images.length?btn('Transcrire les photos',"assist('transcribe')",true):'')+'<div class="grid">'+['classe','branch','teacher'].map((k,i)=>field(['Classe','Branche','Titulaire'][i],k,q[k])).join('')+'</div><label>Questions<textarea id="body" placeholder="Saisir ou coller le questionnaire">'+esc(q.body)+'</textarea></label><label>Insérer un schéma<input type="file" accept="image/*" onchange="upload(this,true)"></label>'+q.figures.map((f,i)=>'<figure><img width="100" src="'+f.src+'">'+btn('Utiliser comme photo à transcrire','useFigureAsSource('+i+')',true)+btn('Retirer le schéma','removeFigure('+i+')',true)+'<label>Largeur (%)<input type="range" min="10" max="100" value="'+f.width+'" onchange="subject().figures['+i+'].width=+this.value;save()"></label><select aria-label="Position" onchange="subject().figures['+i+'].align=this.value;save()">'+['gauche','centre','droite'].map(a=>'<option '+(a===f.align?'selected':'')+'>'+a+'</option>').join('')+'</select></figure>').join(''):'<div class="question">'+esc(q.body||'Questionnaire en attente de saisie.')+'</div>')+'<label>Exemplaires par feuille<select id="copies">'+['Automatique','1','2','3','4'].map((l,i)=>'<option value="'+i+'" '+(q.copies===i?'selected':'')+'>'+l+'</option>').join('')+'</select></label><div class="actions">'+(hasContent(q)?btn(canPrint()?'Aperçu et impression':'Aperçu A4','preview()'):'')+(edit&&teach()&&q.body.trim()?btn('Envoyer à la direction','send()'):q.status==='Envoyé'&&!teach()?btn('Valider','statusTo(\'Validé\')')+btn('Demander une correction','correction()',true)+btn('Marquer imprimé','statusTo(\'Imprimé\')',true):q.status==='Validé'&&!teach()?btn('Marquer imprimé','statusTo(\'Imprimé\')'):'')+'</div>';
 if(edit&&q.images.length){const notes=p.querySelector('#body').parentElement,split=document.createElement('div');split.className='compare';notes.before(split);split.append(notes);const ref=document.createElement('div');ref.innerHTML='<b>Photo source</b><select aria-label="Choisir une page">'+q.images.map((_,i)=>'<option value="'+i+'">Page '+(i+1)+'</option>').join('')+'</select><img alt="Original du questionnaire" style="width:100%" src="'+q.images[0]+'">';ref.querySelector('select').onchange=e=>ref.querySelector('img').src=q.images[+e.target.value];split.prepend(ref)}
-p.querySelectorAll('input[name],textarea').forEach(el=>el.oninput=()=>{q[el.name||'body']=el.value;if(manage())q.correctedBy=me().name;save();const actions=p.querySelector('.actions');if(el.id==='body'&&actions&&!hasContent(q)){actions.querySelector('[onclick="preview()"]')?.remove();actions.querySelector('[onclick="send()"]')?.remove()}if(el.id==='body'&&actions&&!actions.querySelector('[onclick="preview()"]')&&hasContent(q)){actions.insertAdjacentHTML('afterbegin',btn(canPrint()?'Aperçu et impression':'Aperçu A4','preview()')+(teach()?btn('Envoyer à la direction','send()'):''))}});p.querySelector('#copies').onchange=e=>{q.copies=+e.target.value;save()}}
+p.querySelectorAll('input[name],textarea').forEach(el=>el.oninput=()=>{q[el.name||'body']=el.value;if(manage())q.correctedBy=me().name;save();const actions=p.querySelector('.actions');if(el.id==='body'&&actions){if(!hasContent(q))actions.querySelector('[onclick="preview()"]')?.remove();else if(!actions.querySelector('[onclick="preview()"]'))actions.insertAdjacentHTML('afterbegin',btn(canPrint()?'Aperçu et impression':'Aperçu A4','preview()'));if(!q.body.trim())actions.querySelector('[onclick="send()"]')?.remove();else if(teach()&&!actions.querySelector('[onclick="send()"]'))actions.insertAdjacentHTML('beforeend',btn('Envoyer à la direction','send()'))}});p.querySelector('#copies').disabled=!(edit||manage())||q.status==='Imprimé';p.querySelector('#copies').onchange=e=>{q.copies=+e.target.value;save()}}
 function analysisPanel(p,q,edit){
 const report=q.analysis;
 p.innerHTML='<h2>Analyse du questionnaire</h2>';
@@ -318,7 +343,21 @@ async function send(){
  catch(e){if(q.status==='Envoyé')q.status=before;document.querySelector('#cloudStatus').textContent='Envoi à vérifier · '+e.message;render()}
 }
 function oldVersion(i){const v=subject().versions[i];preview(v)}
-async function upload(el,figure){const q=subject();for(const file of el.files){if(!file.type.startsWith('image/'))continue;const src=await new Promise((ok,fail)=>{let r=new FileReader();r.onload=()=>ok(r.result);r.onerror=fail;r.readAsDataURL(file)});if(figure)q.figures.push({src,width:45,align:'centre'});else q.images.push(src)}save();render();if(!figure&&!q.body.trim()&&q.images.length)await assist('transcribe')}
+async function upload(el,figure){
+ const q=subject(),files=[...el.files],msg=document.querySelector('#cloudStatus');if(!q)return;
+ const allowed=/^image\/(png|jpe?g|webp|gif|avif)$/i,errors=[];
+ for(const file of files){
+  try{
+   if(!allowed.test(file.type))throw Error('Format non pris en charge : PNG, JPEG, WebP, GIF ou AVIF.');
+   if(file.size>15*1024*1024)throw Error('Image trop volumineuse (15 Mo maximum).');
+   let src=await new Promise((ok,fail)=>{const reader=new FileReader();reader.onload=()=>ok(reader.result);reader.onerror=fail;reader.readAsDataURL(file)});
+   if(file.size>1.5*1024*1024){const im=new Image();im.src=src;await im.decode();const scale=Math.min(1,2400/Math.max(im.width,im.height));const canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(im.width*scale));canvas.height=Math.max(1,Math.round(im.height*scale));const ctx=canvas.getContext('2d');ctx.fillStyle='white';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(im,0,0,canvas.width,canvas.height);src=canvas.toDataURL('image/jpeg',.88)}
+   if(subject()?.id!==q.id)throw Error('La fiche a changé pendant l’import.');
+   if(figure)q.figures.push({src,width:45,align:'centre'});else if(!q.images.includes(src))q.images.push(src);
+  }catch(e){errors.push(file.name+' : '+(e.message||'import impossible'))}
+ }
+ save();render();try{await pending();if(errors.length)msg.textContent=errors.join(' · ');if(!figure&&!q.body.trim()&&q.images.length&&!errors.length)await assist('transcribe')}catch(e){msg.textContent=e.message}
+}
 function gallery(imgs,edit){return imgs.length?'<div class="sources">'+imgs.map((x,i)=>'<figure><a href="#" onclick="zoom('+i+');return false"><img alt="Photo '+(i+1)+'" src="'+x+'"></a><figcaption>Page '+(i+1)+' '+(edit?(i?btn('Monter','swapPhoto('+i+')',true):'')+btn('Retirer','subject().images.splice('+i+',1);save();render()',true):'')+'</figcaption></figure>').join('')+'</div>':'<p>Aucune photo déposée.</p>'}
 function swapPhoto(i){const a=subject().images;[a[i-1],a[i]]=[a[i],a[i-1]];save();render()}
 function zoom(i){dlg.innerHTML='<img style="width:100%" src="'+subject().images[i]+'">'+btn('Fermer','dlg.close()');dlg.showModal()}
