@@ -611,6 +611,23 @@ function gallery(imgs,edit){return imgs.length?'<div class="sources">'+imgs.map(
 function swapPhoto(i){const a=subject().images;[a[i-1],a[i]]=[a[i],a[i-1]];save();render()}
 function zoom(i){dlg.innerHTML='<img style="width:100%" src="'+subject().images[i]+'">'+btn('Fermer','dlg.close()');dlg.showModal()}
 let previewBusy=false,previewResize=null;
+let singlePhoneHeader=null;
+async function prepareSchoolHeader(img){
+ if(!img)return;
+ if(!singlePhoneHeader){
+  await img.decode();
+  const canvas=document.createElement('canvas');canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;
+  const ctx=canvas.getContext('2d');if(!ctx)throw Error('En-tête indisponible.');
+  ctx.drawImage(img,0,0);
+  // Keep original logo and school name; replace only the contact line.
+  ctx.fillStyle='#fff';ctx.fillRect(canvas.width*.29,canvas.height*.60,canvas.width*.44,canvas.height*.40);
+  ctx.fillStyle='#000';ctx.font='bold '+Math.round(canvas.height*.215)+'px "Times New Roman", serif';
+  ctx.textAlign='center';ctx.textBaseline='alphabetic';ctx.fillText('(+243) 082 53 50 751',canvas.width*.5,canvas.height*.875);
+  singlePhoneHeader=canvas.toDataURL('image/png');
+ }
+ img.src=singlePhoneHeader;await img.decode();
+}
+
 async function preview(q=subject()){
  if(previewBusy||!q||!hasContent(q))return;
  previewBusy=true;const msg=document.querySelector('#cloudStatus');
@@ -626,7 +643,7 @@ async function preview(q=subject()){
    sheet.append(el);return el;
   }
   box=frame(true);
-  const head=box.querySelector('img');if(head)await head.decode().catch(()=>{});
+  const head=box.querySelector('img');await prepareSchoolHeader(head);
   const max=()=>sheet.clientHeight-8;
   const fits=()=>{if([...box.querySelectorAll('.science-formula')].some(el=>el.scrollWidth>box.clientWidth-24))throw Error('Une formule est trop large pour la page. Scindez-la dans l’éditeur.');return box.offsetHeight<=max()};
   const next=()=>{sheet=page();box=frame(false)};
